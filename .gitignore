@@ -5,3 +5,7 @@
 /ComputerVision/CMakeCache.txt
 /ComputerVision/MakeFile
 /ComputerVision/main
+/ComputerVision/build
+/main
+
+*.mp4
