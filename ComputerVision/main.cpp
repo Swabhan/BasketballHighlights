@@ -76,9 +76,16 @@ bool TrackBall(Mat &frame, Mat &roi, Mat &hsv_roi, Mat &mask, Rect &track_window
   return true;
 }
 
+float heightScale = 1;
+float widthScale = 1;
+
 std::tuple<Array, Shape, cv::Mat> read_image(cv::Mat frame, int size)
 {
     auto image = frame;
+
+    heightScale = float(image.size().height) / float(size);
+    widthScale = float(image.size().width) / float(size);
+
     assert(!image.empty() && image.channels() == 3);
 
     cv::resize(image, image, {size, size});
@@ -115,37 +122,28 @@ Rect display_image(cv::Mat image, const Array &output, const Shape &shape)
     {
         auto ptr = output.data() + i * shape[1];
 
-        int x = ptr[1], y = ptr[2], w = ptr[3] - x, h = ptr[4] - y, c = ptr[5];
+        int x = int(ptr[1] * widthScale), y = int(ptr[2] * heightScale), w = int(ptr[3] * widthScale - x), h = int(ptr[4] * heightScale - y ), c = ptr[5];
 
         auto color = CV_RGB(255, 255, 255);
         auto name = std::string(class_names[c]) + ":" + std::to_string(int(ptr[6] * 100)) + "%";
         cv::rectangle(image, {x, y, w, h}, color);
         cv::putText(image, name, {x, y}, cv::FONT_HERSHEY_DUPLEX, 1, color);
 
-        if(class_names[c] == "frisbee"){
-
-          imshow("Frame", image);
-
-          cv::waitKey(0);
-
+         if(class_names[c] == "sports ball"){
           Rect track_window(x, y, w, h);
           return track_window;
         }
     }
 
-    imshow("Frame", image);
-
-    cv::waitKey(0);
-
-
-
-    Rect track_window(800, 400, 75, 75);
+    Rect track_window(0, 0, 0, 0);
     return track_window;
 }
 
 int main(int argc, char **argv){
+  //Open Video
   VideoCapture cap(argv[1]); 
 
+  //Open ONNX Session
   Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "YOLOv7");
   Ort::SessionOptions options;
   options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -159,33 +157,45 @@ int main(int argc, char **argv){
 
   Mat frame, roi, hsv_roi, mask;
 
-  cap >> frame;
-  
-  auto [array, shape, image] = read_image(frame, 640);
-  auto [output, output_shape] = process_image(session, array, shape);
-  Rect track_window = display_image(image, output, output_shape);
+  //Initialize tracking variables
+  int frameCount = 0;
+  Rect track_window(0, 0, 0, 0);
 
-  while(0){
+  while(1){
     //Store Frame
     cap >> frame;
+
+    //Recalibrate Object Location
+    if(frameCount % 60 == 0 || (track_window.x == 0 && frameCount % 15 == 0)){
+      auto [array, shape, image] = read_image(frame, 640);
+      auto [output, output_shape] = process_image(session, array, shape);
+      track_window = display_image(image, output, output_shape);
+
+    }
 
     //If the frame is empty, break immediately
     if (frame.empty())
       break;
- 
-    TrackBall(frame, roi, hsv_roi, mask, track_window);
+    
+    //Apply Mean Shift on object
+    if(track_window.x != 0){
+      TrackBall(frame, roi, hsv_roi, mask, track_window);
+    }
+
+    //Show frame
     imshow("Frame", frame);
 
-    cv::waitKey(0);
 
+    frameCount = frameCount + 1;
 
     //Press ESC on keyboard to exit
     char c=(char)waitKey(25);
     if(c==27)
-      session.release();
+      // session.release();
       break;
   }
-  
+  session.release();
+
   // When everything done, release the video capture object
   cap.release();
  
