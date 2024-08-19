@@ -8,8 +8,15 @@
 #include <opencv2/videoio.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/video.hpp>
-#include <opencv2/video/tracking.hpp>
+// #include <opencv2/video/tracking.hpp>
+#include <opencv2/core/ocl.hpp>
+#include "opencv2/imgproc/types_c.h"
+#include <opencv2/tracking/tracking.hpp>
 
+
+// #include "feature.hpp"
+// #include "onlineMIL.hpp"
+// #include "onlineBoosting.hpp"
 
 
 #include <vector>
@@ -42,39 +49,39 @@ const char *class_names[] = {
   "toaster",        "sink",       "refrigerator",  "book",          "clock",        "vase",          "scissors",
   "teddy bear",     "hair drier", "toothbrush"};
 
-bool TrackBall(Mat &frame, Mat &roi, Mat &hsv_roi, Mat &mask, Rect &track_window)
-{
-  Mat hsv, dst;
+// bool TrackBall(Mat &frame, Mat &roi, Mat &hsv_roi, Mat &mask, Rect &track_window)
+// {
+//   Mat hsv, dst;
   
-  // Setup the termination criteria, either 10 iteration or move by at least 1 pt
-  TermCriteria term_crit(TermCriteria::EPS | TermCriteria::COUNT, 100, 1);
+//   // Setup the termination criteria, either 10 iteration or move by at least 1 pt
+//   TermCriteria term_crit(TermCriteria::EPS | TermCriteria::COUNT, 100, 1);
 
-  int image_width = frame.cols;
-  int image_height = frame.rows;
+//   int image_width = frame.cols;
+//   int image_height = frame.rows;
 
-  roi = frame(track_window);
-  cvtColor(roi, hsv_roi, COLOR_BGR2HSV);
-  inRange(hsv_roi, Scalar(0, 60, 32), Scalar(180, 255, 255), mask);
+//   roi = frame(track_window);
+//   cvtColor(roi, hsv_roi, COLOR_BGR2HSV);
+//   inRange(hsv_roi, Scalar(0, 60, 32), Scalar(180, 255, 255), mask);
 
-  float range_[] = {0, 180};
-  const float* range[] = {range_};
-  Mat roi_hist;
-  int histSize[] = {180};
-  int channels[] = {0};
-  calcHist(&hsv_roi, 1, channels, mask, roi_hist, 1, histSize, range);
-  normalize(roi_hist, roi_hist, 0, 255, NORM_MINMAX);
+//   float range_[] = {0, 180};
+//   const float* range[] = {range_};
+//   Mat roi_hist;
+//   int histSize[] = {180};
+//   int channels[] = {0};
+//   calcHist(&hsv_roi, 1, channels, mask, roi_hist, 1, histSize, range);
+//   normalize(roi_hist, roi_hist, 0, 255, NORM_MINMAX);
 
-  cvtColor(frame, hsv, COLOR_BGR2HSV);
-  calcBackProject(&hsv, 1, channels, roi_hist, dst, range);
+//   cvtColor(frame, hsv, COLOR_BGR2HSV);
+//   calcBackProject(&hsv, 1, channels, roi_hist, dst, range);
 
-  // apply meanshift to get the new location
-  meanShift(dst, track_window, term_crit);
+//   // apply meanshift to get the new location
+//   meanShift(dst, track_window, term_crit);
 
-  // Draw it on image
-  rectangle(frame, track_window, 255, 2);
+//   // Draw it on image
+//   rectangle(frame, track_window, 255, 2);
 
-  return true;
-}
+//   return true;
+// }
 
 float heightScale = 1;
 float widthScale = 1;
@@ -116,7 +123,7 @@ std::pair<Array, Shape> process_image(Ort::Session &session, Array &array, Shape
     return {Array(ptr, ptr + shape[0] * shape[1]), shape};
 }
 
-Rect display_image(cv::Mat image, const Array &output, const Shape &shape)
+Rect2d display_image(cv::Mat image, const Array &output, const Shape &shape)
 {
     for (size_t i = 0; i < shape[0]; ++i)
     {
@@ -130,13 +137,13 @@ Rect display_image(cv::Mat image, const Array &output, const Shape &shape)
         cv::putText(image, name, {x, y}, cv::FONT_HERSHEY_DUPLEX, 1, color);
 
          if(class_names[c] == "sports ball"){
-          Rect track_window(x, y, w, h);
-          return track_window;
+          Rect2d bbox(x, y, w, h);
+          return bbox;
         }
     }
 
-    Rect track_window(0, 0, 0, 0);
-    return track_window;
+    Rect2d bbox(568, 454, 92, 79);
+    return bbox;
 }
 
 int main(int argc, char **argv){
@@ -158,29 +165,59 @@ int main(int argc, char **argv){
   Mat frame, roi, hsv_roi, mask;
 
   //Initialize tracking variables
+  Ptr<Tracker> tracker = TrackerCSRT::create();
   int frameCount = 0;
-  Rect track_window(0, 0, 0, 0);
+
+  cap >> frame;
+  
+  cv::Rect2d bbox(568, 454, 92, 79);
+  
+  auto [array, shape, image] = read_image(frame, 640);
+  auto [output, output_shape] = process_image(session, array, shape);
+  bbox = display_image(image, output, output_shape);
+  Rect bbox_int = Rect(static_cast<int>(bbox.x), static_cast<int>(bbox.y),
+                  static_cast<int>(bbox.width), static_cast<int>(bbox.height));
+
+  tracker->init(frame, bbox);
+
+  bool tracking = true;
+  bool ok = true;
 
   while(1){
     //Store Frame
     cap >> frame;
 
     //Recalibrate Object Location
-    if(frameCount % 60 == 0 || (track_window.x == 0 && frameCount % 15 == 0)){
+    if(frameCount % 120 == 0 || (tracking == false && frameCount % 60)){
       auto [array, shape, image] = read_image(frame, 640);
       auto [output, output_shape] = process_image(session, array, shape);
-      track_window = display_image(image, output, output_shape);
+      bbox = display_image(image, output, output_shape);
+      bbox_int = Rect(static_cast<int>(bbox.x), static_cast<int>(bbox.y),
+                static_cast<int>(bbox.width), static_cast<int>(bbox.height));
+
+      
+      if(bbox_int.x != 568){
+        tracker->init(frame, bbox);
+        tracking = true;
+      }
 
     }
 
-    //If the frame is empty, break immediately
+    if(tracking == true){
+      ok = tracker->update(frame, bbox_int);
+    } else{
+      ok = false;
+      tracking = false;
+    }
+   
+
+    if (ok) {
+      cv::rectangle(frame, bbox_int, cv::Scalar(255, 0, 0), 2, 1);
+    }
+
+    // //If the frame is empty, break immediately
     if (frame.empty())
       break;
-    
-    //Apply Mean Shift on object
-    if(track_window.x != 0){
-      TrackBall(frame, roi, hsv_roi, mask, track_window);
-    }
 
     //Show frame
     imshow("Frame", frame);
