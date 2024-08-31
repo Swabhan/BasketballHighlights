@@ -1,5 +1,6 @@
 #include <iostream>
 
+
 #include <onnxruntime/onnxruntime_cxx_api.h>
 
 #include "opencv2/opencv.hpp"
@@ -8,16 +9,10 @@
 #include <opencv2/videoio.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/video.hpp>
-// #include <opencv2/video/tracking.hpp>
+#include <opencv2/dnn.hpp>
 #include <opencv2/core/ocl.hpp>
 #include "opencv2/imgproc/types_c.h"
 #include <opencv2/tracking/tracking.hpp>
-
-
-// #include "feature.hpp"
-// #include "onlineMIL.hpp"
-// #include "onlineBoosting.hpp"
-
 
 #include <vector>
 #include <cassert>
@@ -25,6 +20,7 @@
 
 using namespace std;
 using namespace cv;
+using namespace cv::dnn;
 
 //Onnx + Yolo
 using Array = std::vector<float>;
@@ -48,40 +44,6 @@ const char *class_names[] = {
   "laptop",         "mouse",      "remote",        "keyboard",      "cell phone",   "microwave",     "oven",
   "toaster",        "sink",       "refrigerator",  "book",          "clock",        "vase",          "scissors",
   "teddy bear",     "hair drier", "toothbrush"};
-
-// bool TrackBall(Mat &frame, Mat &roi, Mat &hsv_roi, Mat &mask, Rect &track_window)
-// {
-//   Mat hsv, dst;
-  
-//   // Setup the termination criteria, either 10 iteration or move by at least 1 pt
-//   TermCriteria term_crit(TermCriteria::EPS | TermCriteria::COUNT, 100, 1);
-
-//   int image_width = frame.cols;
-//   int image_height = frame.rows;
-
-//   roi = frame(track_window);
-//   cvtColor(roi, hsv_roi, COLOR_BGR2HSV);
-//   inRange(hsv_roi, Scalar(0, 60, 32), Scalar(180, 255, 255), mask);
-
-//   float range_[] = {0, 180};
-//   const float* range[] = {range_};
-//   Mat roi_hist;
-//   int histSize[] = {180};
-//   int channels[] = {0};
-//   calcHist(&hsv_roi, 1, channels, mask, roi_hist, 1, histSize, range);
-//   normalize(roi_hist, roi_hist, 0, 255, NORM_MINMAX);
-
-//   cvtColor(frame, hsv, COLOR_BGR2HSV);
-//   calcBackProject(&hsv, 1, channels, roi_hist, dst, range);
-
-//   // apply meanshift to get the new location
-//   meanShift(dst, track_window, term_crit);
-
-//   // Draw it on image
-//   rectangle(frame, track_window, 255, 2);
-
-//   return true;
-// }
 
 float heightScale = 1;
 float widthScale = 1;
@@ -146,10 +108,7 @@ Rect2d display_image(cv::Mat image, const Array &output, const Shape &shape)
     return bbox;
 }
 
-int main(int argc, char **argv){
-  //Open Video
-  VideoCapture cap(argv[1]); 
-
+int trackingInit(VideoCapture &cap){
   //Open ONNX Session
   Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "YOLOv7");
   Ort::SessionOptions options;
@@ -222,7 +181,6 @@ int main(int argc, char **argv){
     //Show frame
     imshow("Frame", frame);
 
-
     frameCount = frameCount + 1;
 
     //Press ESC on keyboard to exit
@@ -235,7 +193,113 @@ int main(int argc, char **argv){
 
   // When everything done, release the video capture object
   cap.release();
- 
+
+  return 0;
+}
+
+
+const int POSE_PAIRS[14][2] = 
+  {   
+      {0,1}, {1,2}, {2,3},
+      {3,4}, {1,5}, {5,6},
+      {6,7}, {1,14}, {14,8}, {8,9},
+      {9,10}, {14,11}, {11,12}, {12,13}
+  };
+
+string protoFile = "/Users/swabhankatkoori/Documents/Development/BasketballHighlights/openpose/models/pose/mpi/pose_deploy_linevec_faster_4_stages.prototxt";
+string weightsFile = "/Users/swabhankatkoori/Documents/Development/BasketballHighlights/openpose/models/pose/mpi/pose_iter_160000.caffemodel";
+
+int nPoints = 15;
+string device = "cpu";
+
+int main(int argc, char **argv){
+  //Open Video
+  VideoCapture cap(argv[1]); 
+  //trackingInit(cap);
+
+  Net net = cv::dnn::readNetFromCaffe(protoFile, weightsFile);
+  Mat frame = imread("cade.jpg");
+
+  if (frame.empty()) {
+    std::cerr << "Error: Unable to load image!" << std::endl;
+    return -1;
+  }
+
+  while(1){
+    //Store Frame
+    cap >> frame;
+
+    // Specify the input image dimensions
+    int inWidth = 368;
+    int inHeight = 368;
+    float thresh = 0.1;  
+
+    int frameWidth = frame.cols;
+    int frameHeight = frame.rows;
+    
+    // Prepare the frame to be fed to the network
+    Mat inpBlob = cv::dnn::blobFromImage(frame, 1.0 / 255, Size(inWidth, inHeight), Scalar(0, 0, 0), false, false);
+    
+    // Set the prepared object as the input blob of the network
+    net.setInput(inpBlob);
+
+
+    Mat output = net.forward();
+
+    int H = output.size[2];
+    int W = output.size[3];
+
+    net.setPreferableBackend(cv::dnn::DNN_TARGET_CPU);
+    
+    // find the position of the body parts
+    vector<Point> points(nPoints);
+    for (int n=0; n < nPoints; n++)
+    {
+      // Probability map of corresponding body's part.
+      Mat probMap(H, W, CV_32F, output.ptr(0,n));
+
+      Point2f p(-1,-1);
+      Point maxLoc;
+      double prob;
+      minMaxLoc(probMap, 0, &prob, 0, &maxLoc);
+      if (prob > thresh)
+      {
+          p = maxLoc;
+          p.x *= (float)frameWidth / W ;
+          p.y *= (float)frameHeight / H ;
+
+          circle(frame, cv::Point((int)p.x, (int)p.y), 8, Scalar(0,255,255), -1);
+          cv::putText(frame, cv::format("%d", n), cv::Point((int)p.x, (int)p.y), cv::FONT_HERSHEY_COMPLEX, 1, cv::Scalar(0, 0, 255), 2);
+
+      }
+      points[n] = p;
+    }
+
+
+    int nPairs = sizeof(POSE_PAIRS)/sizeof(POSE_PAIRS[0]);
+    
+    for (int n = 0; n < nPairs; n++)
+    {
+        // lookup 2 connected body/hand parts
+        Point2f partA = points[POSE_PAIRS[n][0]];
+        Point2f partB = points[POSE_PAIRS[n][1]];
+    
+        if (partA.x<=0 || partA.y<=0 || partB.x<=0 || partB.y<=0)
+            continue;
+    
+        line(frame, partA, partB, Scalar(0,255,255), 8);
+        circle(frame, partA, 8, Scalar(0,0,255), -1);
+        circle(frame, partB, 8, Scalar(0,0,255), -1);
+    }
+
+    imshow("Frame", frame);
+
+    char c=(char)waitKey(25);
+    if(c==27)
+      // session.release();
+      break;
+  }
+
   // Closes all the frames
   destroyAllWindows();
      
